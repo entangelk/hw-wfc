@@ -1,0 +1,9 @@
+{
+  "name": "NVIDIA H100 SXM (per SM)",
+  "sram_bytes": 262144,
+  "dram_bandwidth_gbps": 3352.0,
+  "sram_bandwidth_gbps": 33000.0,
+  "max_registers": 65536,
+  "alignment_bytes": 256,
+  "compute_gflops": 990000.0
+}

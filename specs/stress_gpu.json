@@ -1,0 +1,9 @@
+{
+  "name": "Stress GPU (12KB SRAM)",
+  "sram_bytes": 12288,
+  "dram_bandwidth_gbps": 900.0,
+  "sram_bandwidth_gbps": 19000.0,
+  "max_registers": 32768,
+  "alignment_bytes": 64,
+  "compute_gflops": 312000.0
+}

@@ -1,0 +1,9 @@
+{
+  "name": "Toy GPU (Research Target)",
+  "sram_bytes": 65536,
+  "dram_bandwidth_gbps": 900.0,
+  "sram_bandwidth_gbps": 19000.0,
+  "max_registers": 65536,
+  "alignment_bytes": 128,
+  "compute_gflops": 312000.0
+}

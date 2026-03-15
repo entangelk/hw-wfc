@@ -1,0 +1,9 @@
+{
+  "name": "NVIDIA A100 (per SM)",
+  "sram_bytes": 196608,
+  "dram_bandwidth_gbps": 2039.0,
+  "sram_bandwidth_gbps": 19500.0,
+  "max_registers": 65536,
+  "alignment_bytes": 128,
+  "compute_gflops": 312000.0
+}
