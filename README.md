@@ -105,6 +105,28 @@ Only at 12KB does Softmax select a smaller tile (16×16), producing differentiat
 └──────────────┘     └───────────────┘     └──────────────┘
 ```
 
+## GPU Execution Verification (v2.7)
+
+Codegen-generated Triton kernels verified on RTX 3060 (SM86, CUDA 12.8):
+
+| Kernel | Type | Result | Error |
+|--------|------|--------|-------|
+| Linear (MatMul) | GEMM | PASS | rel_err < 0.5% (fp16) |
+| ReLU | Element-wise | PASS | Exact match |
+| Softmax | Row-parallel | PASS | max_diff < 1e-8 |
+
+### HW-WFC vs Triton Autotuner
+
+| Workload | WFC (TFLOPS) | Autotuner (TFLOPS) | Ratio |
+|----------|-------------|-------------------|-------|
+| Small (256×512) | 5.08 | 7.17 | 70.8% |
+| Medium (1024²) | 16.04 | 20.17 | 79.5% |
+| Large (2048²) | 19.31 | 20.82 | 92.7% |
+| GPT-2 FFN | 18.67 | 20.26 | 92.2% |
+| BERT QKV | 15.41 | 13.42 | **114.9%** |
+
+**Average: 90%** of autotuner performance — achieved in ~1ms (constraint propagation) vs autotuner's dozens of kernel launches.
+
 ## Quick Start
 
 ```bash
@@ -114,11 +136,14 @@ python examples/attention_block.py
 # Run Safety Checks
 python tests/test_safety_checks.py
 
+# Verify Triton kernels on GPU (requires torch + triton)
+python examples/triton_verify.py
+
+# Compare WFC vs Triton autotuner
+python examples/triton_autotuner_compare.py
+
 # Generate / update all visualizations
 python tools/generate_all_visuals.py
-
-# Regenerate collapse GIF only
-python tools/visualize_collapse.py
 ```
 
 ## Cost Model
@@ -131,15 +156,14 @@ Three-component additive scoring:
 
 ## Hardware Specs
 
-Three virtual GPU specs with real A100 performance numbers but varying SRAM sizes to stress-test the algorithm:
-
 | Spec | SRAM | Purpose |
 |------|------|---------|
 | `toy_gpu.json` | 64KB | Comfortable environment, basic validation |
 | `tight_gpu.json` | 16KB | Moderate constraint |
 | `stress_gpu.json` | 12KB | Tight SRAM, forces per-layer-type differentiation |
-
-> **Why virtual specs?** Real GPUs (A100: 192KB, H100: 256KB) have enough SRAM that all tiles fit comfortably — no constraint fires, no differentiation occurs. Virtual specs with small SRAM create the hard trade-offs that actually exercise the algorithm. See [Architecture Guide §2](docs/architecture_guide.md#2-gpu-스펙-설계-의도) for full rationale.
+| `a100.json` | 192KB | NVIDIA A100 (HBM2e 2039 GB/s) |
+| `h100.json` | 256KB | NVIDIA H100 (HBM3 3352 GB/s) |
+| `rtx3060.json` | 100KB | NVIDIA RTX 3060 (GDDR6 360 GB/s) — GPU execution verified |
 
 ## Safety Checks (5/5 Pass)
 
@@ -177,6 +201,7 @@ hw-wfc/
 
 - Python 3.10+
 - Pillow (visualization only)
+- PyTorch + Triton (GPU verification only, `pip install torch triton`)
 
 ## License
 
