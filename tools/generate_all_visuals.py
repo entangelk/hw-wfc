@@ -339,15 +339,15 @@ def viz_copier_problem():
                       f"Unique states: {unique}/{len(nodes)} — DIFFERENTIATED",
                       fill=GREEN, font=F_LABEL)
             draw.text((px + 15, verdict_y + 22),
-                      "Softmax 4x multiplier forces smaller tile",
+                      "Current WFC heuristic picks a smaller Softmax tile",
                       fill=TEXT_DIM, font=F_SMALL)
 
     # 하단 설명
     draw.text((20, H - 55),
-              "Root cause: when SRAM is large enough for all layer types, the optimal tile is universal.",
+              "Observation: with ample SRAM, the current heuristic tends to reuse the same tile everywhere.",
               fill=TEXT_DIM, font=F_SMALL)
     draw.text((20, H - 35),
-              "Fix: tighter SRAM forces working memory tradeoffs → different layers need different tiles.",
+              "Tighter SRAM increases working-memory pressure and can diversify heuristic choices.",
               fill=TEXT_DIM, font=F_SMALL)
 
     path = ASSETS / "copier_problem.png"
@@ -543,10 +543,10 @@ def viz_sram_comparison():
 
     # 하단 인사이트
     draw.text((20, H - 45),
-              "Insight: Tighter SRAM → working memory tradeoffs → layer-type differentiation.",
+              "Insight: Tighter SRAM can increase working-memory pressure and diversify heuristic choices.",
               fill=TEXT_DIM, font=F_SMALL)
     draw.text((20, H - 25),
-              "64KB is 'too comfortable' — all layers fit the same optimal tile (copier problem).",
+              "64KB is 'too comfortable' — the current heuristic collapses to the same tile across layers.",
               fill=TEXT_DIM, font=F_SMALL)
 
     path = ASSETS / "sram_comparison.png"

@@ -28,27 +28,30 @@ A research prototype that applies the Wave Function Collapse (WFC) algorithm to 
 | Metric | Value |
 |--------|-------|
 | Search space reduction | 396 → 6 states (98.5%) |
-| Quality vs exhaustive baseline | 100% (transition-aware, top-8/layer) |
+| Match vs truncated exhaustive | 100% (transition-aware, top-8/layer) |
+| Quality vs exact full DP | 98.3% on `stress_gpu`, 100% on `toy_gpu` |
 | WFC scheduling time | ~3ms (6-layer attention block, `stress_gpu`) |
-| Exhaustive baseline | 262K combinations, ~7-9s |
-| Speedup | **~2400x** |
+| Naive truncated exhaustive | 262K combinations, ~7-9s |
+| Speedup vs naive truncated exhaustive | **~2400x** |
 
 These numbers are reproduced by `python examples/attention_exhaustive_benchmark.py`.
-The exhaustive baseline is the top 8 hard-constraint survivors per layer (`8^6 = 262,144`), not the full candidate Cartesian product, so absolute times are machine-dependent.
-Repeated validation on `stress_gpu` and `toy_gpu` kept the same final schedule at `top-k = 4/6/8/10`, with transition-aware quality staying at `100%`.
+Important: the `~2400x` figure is against a naive top-k exhaustive enumerator, not against the best exact solver for this chain objective.
+The truncated exhaustive baseline keeps only the top 8 unary survivors per layer (`8^6 = 262,144`), so it can miss the true optimum once pairwise transition costs are considered.
+The same script also reports a full exact dynamic-programming baseline over all hard-constrained candidates; on `stress_gpu`, the current greedy WFC heuristic reaches `98.3%` of that exact objective and does not match the full optimum.
 
-### Layer-Type Differentiation (12KB SRAM)
+### Current Heuristic Differentiation (12KB SRAM)
 
 ```
-QKV_Proj   → 32x32  ROW_MAJOR  SRAM   (LINEAR,  working memory 3x)
-QK_MatMul  → 32x32  ROW_MAJOR  SRAM   (LINEAR,  working memory 3x)
-Softmax    → 16x16  ROW_MAJOR  SRAM   (SOFTMAX, working memory 4x)  ← different!
-AV_MatMul  → 32x32  ROW_MAJOR  SRAM   (LINEAR,  working memory 3x)
-Out_Proj   → 32x32  ROW_MAJOR  SRAM   (LINEAR,  working memory 3x)
-LayerNorm  → 32x32  ROW_MAJOR  SRAM   (LAYERNORM, working memory 3x)
+QKV_Proj   → 32x32  ROW_MAJOR  SRAM
+QK_MatMul  → 32x32  ROW_MAJOR  SRAM
+Softmax    → 16x16  ROW_MAJOR  SRAM  ← different in the current WFC run
+AV_MatMul  → 32x32  ROW_MAJOR  SRAM
+Out_Proj   → 32x32  ROW_MAJOR  SRAM
+LayerNorm  → 32x32  ROW_MAJOR  SRAM
 ```
 
-Under tight SRAM, the working memory multiplier difference between layer types forces the algorithm to select different optimal tiles — Softmax (4× buffer) cannot use 32×32 in 12KB SRAM, while LINEAR (3× buffer) can.
+Under `stress_gpu`, the current greedy WFC run collapses Softmax to `16x16` while the other layers stay at `32x32`.
+Important: working-memory overflow is currently modeled as a strong cache penalty in [src/cost_model.py](/mnt/d/devel/hw-wfc/src/cost_model.py), not as a hard elimination in [src/constraint.py](/mnt/d/devel/hw-wfc/src/constraint.py). So this differentiation is a heuristic result, not proof that `32x32` Softmax is physically impossible.
 
 ## Visualizations
 
@@ -71,7 +74,7 @@ Candidate removal rate as threshold varies from 0.3 to 3.0. Red line (25%) is th
 ### The Copier Problem (Failure → Fix)
 
 With ample SRAM (64KB), all layers converge to the same state — the "copier problem."
-Reducing SRAM to 12KB forces Softmax to pick a different tile due to working memory differences.
+Reducing SRAM to 12KB makes the current WFC heuristic pick a different Softmax tile.
 
 ![Copier Problem](assets/copier_problem.png)
 
@@ -85,7 +88,7 @@ In a ROW → ? → COL chain with threshold=0.5, contradiction occurs → 1 back
 ### SRAM Size Impact
 
 The same 6-layer Attention Block scheduled under 64KB / 16KB / 12KB SRAM.
-Only at 12KB does Softmax select a smaller tile (16×16), producing differentiation.
+Only in the current 12KB heuristic run does Softmax select a smaller tile (16×16), producing differentiation.
 
 ![SRAM Comparison](assets/sram_comparison.png)
 
@@ -111,7 +114,7 @@ Only at 12KB does Softmax select a smaller tile (16×16), producing differentiat
 
 ## GPU Execution Verification (v2.7)
 
-Codegen-generated Triton kernels verified on RTX 3060 (SM86, CUDA 12.8):
+Codegen-generated Triton kernels were re-verified in `.venv` on RTX 3060 (SM86, CUDA 12.8):
 
 | Kernel | Type | Result | Error |
 |--------|------|--------|-------|
@@ -121,15 +124,16 @@ Codegen-generated Triton kernels verified on RTX 3060 (SM86, CUDA 12.8):
 
 ### HW-WFC vs Triton Autotuner
 
-| Workload | WFC (TFLOPS) | Autotuner (TFLOPS) | Ratio |
-|----------|-------------|-------------------|-------|
-| Small (256×512) | 5.08 | 7.17 | 70.8% |
-| Medium (1024²) | 16.04 | 20.17 | 79.5% |
-| Large (2048²) | 19.31 | 20.82 | 92.7% |
-| GPT-2 FFN | 18.67 | 20.26 | 92.2% |
-| BERT QKV | 15.41 | 13.42 | **114.9%** |
+This section is currently under re-audit.
 
-**Average: 90%** of autotuner performance — achieved in ~1ms (constraint propagation) vs autotuner's dozens of kernel launches.
+Repeated reruns in the same `.venv` and on the same RTX 3060 already showed materially different averages (`118%` and `84%` WFC/autotuner).
+We then repeated the script 5 more times in isolated processes with separate `TRITON_CACHE_DIR` values and no other visible GPU compute processes; the average ratio still ranged from `86.0%` to `94.6%`, so the old fixed TFLOPS table is still not stable enough for README use.
+
+What is verified today:
+- The Triton kernels execute correctly on the target GPU.
+- The comparison script runs end-to-end in `.venv`.
+- A pattern does emerge under isolated reruns: the tiny `Small (256x512x256)` case is unstable at ~`0.01-0.02ms` and Triton flips between `32x64x32` and `32x32x32`, while the larger workloads are more consistent and Triton usually stays about `5-20%` ahead of the current WFC choice.
+- The current benchmarking methodology still needs stabilization before we can claim a single authoritative WFC/autotuner ratio.
 
 ## Quick Start
 

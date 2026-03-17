@@ -81,18 +81,18 @@ Spec design starts from the question: "Which aspect of the algorithm do we want 
 
 ```
 32x32 float32 tile = 4KB
-  -> LINEAR (working memory 3x) = 12KB -> 100% of SRAM. Exactly fills it
-  -> SOFTMAX (working memory 4x) = 16KB -> Exceeds SRAM! Unusable
+  -> LINEAR (working memory 3x) = 12KB -> 100% of SRAM
+  -> SOFTMAX (working memory 4x) = 16KB -> exceeds the working-memory target used by the cache penalty
 
 16x16 float32 tile = 1KB
-  -> SOFTMAX (4x) = 4KB -> 33% of SRAM. Comfortable
+  -> SOFTMAX (4x) = 4KB -> 33% of SRAM
 ```
 
 What this means:
-- **LINEAR layers: 32x32 is optimal** (fills SRAM completely for maximum efficiency)
-- **SOFTMAX layers: 16x16 is optimal** (32x32 would exceed SRAM)
-- Within the same model, **different layers have different optimal tiles**
-- Whether the algorithm discovers this on its own is the core verification point (solving the "copier problem")
+- The current heuristic strongly prefers **32x32 for LINEAR** under stress_gpu
+- The current heuristic often prefers **16x16 for SOFTMAX** because the cache term penalizes working-memory overflow
+- Within the same model, **different layers can end up with different chosen tiles**
+- Whether the heuristic discovers this on its own is the core verification point (solving the "copier problem")
 
 #### What Is the Working Memory Multiplier?
 
@@ -177,7 +177,7 @@ Higher bonus when SRAM utilization is close to the sweet spot (75%).
 ```
 Too little usage (20%) -> SRAM wasted -> low score
 Just right (75%)       -> ideal -> highest score
-Exceeded (>100%)       -> physically impossible -> penalty
+Exceeded (>100%)       -> strong penalty for working-memory overflow
 ```
 
 Modeled as a Gaussian curve peaking around 0.75.
@@ -188,7 +188,7 @@ Modeled as a Gaussian curve peaking around 0.75.
 |-----------|----------------------|-------------------|
 | Roofline | Compute/memory efficiency by tile size | All tiles get the same score -> entropy-based selection = random |
 | Layout Affinity | Optimal layout differences per layer type | Softmax and LINEAR pick the same layout -> copier problem |
-| Cache Efficiency | SRAM utilization and overflow | SRAM-exceeding tiles get high scores -> physically impossible selections |
+| Cache Efficiency | SRAM utilization and working-memory overflow pressure | overflowed tiles can look attractive unless the score penalizes them |
 
 ---
 
@@ -348,7 +348,7 @@ Verification method:
 - **5b**: Run heterogeneous layers (MatMul+Softmax+LayerNorm) on stress_gpu
 
 Pass criteria: `all_same_state = False` for heterogeneous layers.
-Current result: MatMul=32x32, Softmax=16x16 -- differentiation achieved.
+Current heuristic result: MatMul=32x32, Softmax=16x16 -- differentiation achieved.
 
 ---
 
@@ -378,14 +378,18 @@ Scheduling 4 layers of an Attention Block on stress_gpu (12KB):
   -> Softmax reduced to 22 candidates
 
 [Step 4: Remaining Collapses]
-  Softmax: Entropy calculation -> 16x16 ROW_MAJOR scores highest (32x32 exceeds working memory)
+  Softmax: Entropy calculation -> 16x16 ROW_MAJOR scores highest under the current heuristic
   AV_MatMul -> 32x32 ROW_MAJOR (same physical reasoning as QK_MatMul)
   LayerNorm -> 32x32 ROW_MAJOR
 
 [Result]
   264 -> 4 states (98.5% reduction)
-  Only Softmax selects a different tile -> copier problem resolved
+  Only Softmax selects a different tile in this heuristic run -> copier problem resolved
 ```
+
+Important note:
+- Working-memory overflow is currently modeled as a strong soft penalty in `cost_model.py`, not as a hard elimination in `constraint.py`
+- Because of that, this walkthrough reflects the current WFC heuristic path, not a proof of the global optimum over the full candidate set
 
 ---
 

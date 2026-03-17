@@ -332,8 +332,8 @@ def check_5_scaling():
               f"all_same={all_same}")
 
     # ── 5b: 이질적 레이어 (stress_gpu 12KB — SRAM이 tight한 환경) ──
-    # 12KB SRAM에서는 working memory 차이로 인해 레이어별 다른 타일이 선택되어야 함
-    # LINEAR(3x) → 32x32 최적, SOFTMAX(4x) → 16x16 최적
+    # 현재 heuristic에서는 12KB SRAM에서 레이어별 다른 타일이 선택되는지 확인한다.
+    # 이 검사는 global optimum 증명이 아니라 "복사기 문제를 피했는가"를 본다.
     stress_spec_path = Path(__file__).resolve().parent.parent / "specs" / "stress_gpu.json"
     stress_spec = HardwareSpec.from_json(stress_spec_path)
 
@@ -380,7 +380,7 @@ def check_5_scaling():
     if all_same:
         print(f"  !! 이질적 레이어인데도 동일 상태 → 복사기 문제 미해결")
     else:
-        print(f"  OK: 레이어별 다른 최적 상태를 찾음 → 복사기 문제 해결")
+        print(f"  OK: 레이어별 다른 상태를 선택함 → 복사기 문제는 피함")
 
 
 def main():
