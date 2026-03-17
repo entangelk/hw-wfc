@@ -28,10 +28,14 @@ A research prototype that applies the Wave Function Collapse (WFC) algorithm to 
 | Metric | Value |
 |--------|-------|
 | Search space reduction | 396 → 6 states (98.5%) |
-| Quality vs Grid Search | 100% (transition-aware) |
-| Speed | ~2.5ms (6-layer attention block) |
-| Grid Search equivalent | 262K combinations, 6000ms |
+| Quality vs exhaustive baseline | 100% (transition-aware, top-8/layer) |
+| WFC scheduling time | ~3ms (6-layer attention block, `stress_gpu`) |
+| Exhaustive baseline | 262K combinations, ~7-9s |
 | Speedup | **~2400x** |
+
+These numbers are reproduced by `python examples/attention_exhaustive_benchmark.py`.
+The exhaustive baseline is the top 8 hard-constraint survivors per layer (`8^6 = 262,144`), not the full candidate Cartesian product, so absolute times are machine-dependent.
+Repeated validation on `stress_gpu` and `toy_gpu` kept the same final schedule at `top-k = 4/6/8/10`, with transition-aware quality staying at `100%`.
 
 ### Layer-Type Differentiation (12KB SRAM)
 
@@ -132,6 +136,9 @@ Codegen-generated Triton kernels verified on RTX 3060 (SM86, CUDA 12.8):
 ```bash
 # Schedule a Transformer Attention Block
 python examples/attention_block.py
+
+# Reproduce the README benchmark (top-8 exhaustive baseline)
+python examples/attention_exhaustive_benchmark.py
 
 # Run Safety Checks
 python tests/test_safety_checks.py

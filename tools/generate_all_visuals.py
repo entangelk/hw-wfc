@@ -572,14 +572,25 @@ def write_visuals_log(elapsed_ms: float):
     log_path = ASSETS / "VISUALS_LOG.md"
 
     # 기존 로그 읽기
-    history = ""
+    history_lines: list[str] = []
     if log_path.exists():
         content = log_path.read_text()
         # "## History" 이후 부분 추출
         if "## History" in content:
-            history = content.split("## History")[1]
+            raw_history = content.split("## History", 1)[1].strip().splitlines()
+            # 기존 헤더 행은 버리고 실제 엔트리만 보존
+            for line in raw_history:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if stripped.startswith("| Date | Time | Version | Notes |"):
+                    continue
+                if stripped.startswith("|------|------|---------|-------|"):
+                    continue
+                history_lines.append(stripped)
 
-    new_entry = f"| {now} | {elapsed_ms:.0f}ms | v2.1 | All 6 visuals regenerated |"
+    new_entry = f"| {now} | {elapsed_ms:.0f}ms | v2.7.1 | All 6 visuals regenerated |"
+    history_block = "\n".join([new_entry, *history_lines])
 
     log_content = f"""# Visuals Log
 
@@ -612,8 +623,7 @@ python tools/visualize_collapse.py
 
 | Date | Time | Version | Notes |
 |------|------|---------|-------|
-{new_entry}
-{history.strip()}
+{history_block}
 """
     log_path.write_text(log_content)
     print(f"    → {log_path}")
