@@ -52,6 +52,26 @@ class LayerType(Enum):
     LAYERNORM = auto()
 
 
+def working_memory_multiplier(layer_type: LayerType) -> float:
+    """레이어 타입별 working memory 배수.
+
+    타일 하나를 처리할 때 SRAM에 동시에 올려야 하는 버퍼 수.
+    - LINEAR: input_tile + weight_tile + output_tile = 3x
+    - CONV2D: input_tile + kernel + output_tile ≈ 3x
+    - SOFTMAX: input + exp_buffer + sum_buffer + output = 4x
+    - RELU: input + output = 2x
+    - LAYERNORM: input + mean/var + output = 3x
+    """
+    return {
+        LayerType.LINEAR: 3.0,
+        LayerType.CONV2D: 3.0,
+        LayerType.DEPTHWISE_CONV: 2.5,
+        LayerType.SOFTMAX: 4.0,
+        LayerType.RELU: 2.0,
+        LayerType.LAYERNORM: 3.0,
+    }.get(layer_type, 2.0)
+
+
 @dataclass
 class LayerNode:
     """모델 그래프의 단일 레이어 노드.

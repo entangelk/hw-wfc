@@ -6,185 +6,170 @@
 
 # HW-WFC
 
-**Hardware Wave Function Collapse** — AI hardware compiler auto-scheduling using constraint-based collapse.
+**Hardware Wave Function Collapse** — constraint-based collapsing search applied to AI hardware compiler auto-scheduling.
 
-A research prototype that applies the Wave Function Collapse (WFC) algorithm to AI hardware compiler auto-scheduling. It determines the optimal tile size, memory layout, and compute location for each layer through constraint-driven search.
+A research prototype that applies the Wave Function Collapse (WFC) algorithm to determine per-layer tile size, memory layout, and compute location for AI model inference on GPU hardware.
 
-> **New here?** Start with the **[Architecture Guide](docs/architecture_guide.md)** — it explains *why* every design decision was made. For the algorithm concept and motivation, see the **[Concept Document](docs/concept.md)**.
+**Status**: Research complete (v2.9). The algorithm is correct and the cost model shows directional correlation with real GPU performance, but no advantage over existing methods has been demonstrated. See [Research Results](docs/result.md) for the full analysis.
 
-## How It Works
+**Documentation**: [Research Results](docs/result.md) | [Architecture Guide](docs/architecture_guide.md) | [Concept](docs/concept.md)
+
+---
+
+## Algorithm
 
 ![HW-WFC Collapse Animation](assets/collapse_animation.gif)
 
-1. **Superposition** — Each layer starts with all possible HW implementation states (tile size × layout × location) as candidates
-2. **Hard Constraints** — Physically impossible candidates are pruned (SRAM capacity overflow, alignment violation)
-3. **Bottleneck-First Collapse** — The layer with the highest FLOPs collapses to its optimal state first
-4. **Constraint Propagation** — Transition-cost-based candidate pruning propagates from collapsed nodes to neighbors
-5. **Entropy-Ordered Collapse** — Remaining nodes collapse in Shannon entropy order (most certain first)
-6. **Backtracking** — Snapshot-based state restoration on contradiction
+1. **Superposition** — Each layer holds all possible HW states (tile size × layout × location)
+2. **Hard Constraints** — Eliminate physically impossible candidates (SRAM capacity, working memory overflow, alignment)
+3. **Bottleneck-First Collapse** — Highest-FLOPs layer collapses first
+4. **Constraint Propagation** — Transition-cost-based pruning propagates to neighbors
+5. **Entropy-Ordered Collapse** — Remaining layers collapse by Shannon entropy
+6. **Backtracking** — Snapshot-based rollback on contradiction
 
-## Key Results
+---
+
+## Results Summary
+
+6-layer Transformer Attention Block on `stress_gpu` (12KB SRAM).
 
 | Metric | Value |
 |--------|-------|
-| Search space reduction | 396 → 6 states (98.5%) |
-| Match vs truncated exhaustive | 100% (transition-aware, top-8/layer) |
-| Quality vs exact full DP | 98.3% on `stress_gpu`, 100% on `toy_gpu` |
-| WFC scheduling time | ~3ms (6-layer attention block, `stress_gpu`) |
-| Naive truncated exhaustive | 262K combinations, ~7-9s |
-| Speedup vs naive truncated exhaustive | **~2400x** |
+| WFC vs Exact DP (Viterbi) | **100% match** — identical states |
+| WFC time | ~2-3ms |
+| Exact DP time | ~7-10ms |
+| Search space | ~2 billion combinations |
+| Cost model ↔ GPU correlation | **Avg Spearman ρ = +0.52** (Softmax: 1.0, MatMul large: +0.72) |
 
-These numbers are reproduced by `python examples/attention_exhaustive_benchmark.py`.
-Important: the `~2400x` figure is against a naive top-k exhaustive enumerator, not against the best exact solver for this chain objective.
-The truncated exhaustive baseline keeps only the top 8 unary survivors per layer (`8^6 = 262,144`), so it can miss the true optimum once pairwise transition costs are considered.
-The same script also reports a full exact dynamic-programming baseline over all hard-constrained candidates; on `stress_gpu`, the current greedy WFC heuristic reaches `98.3%` of that exact objective and does not match the full optimum.
+### What worked
 
-### Current Heuristic Differentiation (12KB SRAM)
+- WFC correctly navigates the constrained search space and matches the exact DP optimum on this benchmark.
+- The cost model shows positive rank correlation with actual Triton kernel execution time — Softmax achieves perfect agreement (ρ = 1.0).
+- Hard constraints (SRAM, alignment, working memory) drive the most meaningful scheduling differentiation.
+
+### What did not work
+
+- **No advantage over existing methods.** WFC does not outperform exact DP, Triton autotuner, or any well-optimized baseline.
+- **Cost model saturates for MatMul.** Roofline scores are all 1.0 → discrimination comes solely from the secondary `cache_efficiency` component.
+- **Virtual spec dependency.** The key scenario (12KB SRAM) does not exist on real GPUs. On A100 (192KB), the problem is trivial.
+- **Naive exhaustive speedup (~3500x) is misleading.** The baseline is unoptimized Python; exact DP solves the same problem in ~7-10ms.
+
+Full analysis: **[Research Results](docs/result.md)**
+
+---
+
+## WFC vs Exact DP (12KB SRAM)
 
 ```
-QKV_Proj   → 32x32  ROW_MAJOR  SRAM
-QK_MatMul  → 32x32  ROW_MAJOR  SRAM
-Softmax    → 16x16  ROW_MAJOR  SRAM  ← different in the current WFC run
-AV_MatMul  → 32x32  ROW_MAJOR  SRAM
-Out_Proj   → 32x32  ROW_MAJOR  SRAM
-LayerNorm  → 32x32  ROW_MAJOR  SRAM
+Layer       WFC heuristic       Exact DP
+QKV_Proj    32x32 ROW SRAM      32x32 ROW SRAM
+QK_MatMul   32x32 ROW SRAM      32x32 ROW SRAM
+Softmax     16x16 ROW SRAM      16x16 ROW SRAM   ← working memory constraint
+AV_MatMul   32x32 ROW SRAM      32x32 ROW SRAM
+Out_Proj    32x32 ROW SRAM      32x32 ROW SRAM
+LayerNorm   32x32 ROW SRAM      32x32 ROW SRAM
 ```
 
-Under `stress_gpu`, the current greedy WFC run collapses Softmax to `16x16` while the other layers stay at `32x32`.
-Important: working-memory overflow is currently modeled as a strong cache penalty in [src/cost_model.py](/mnt/d/devel/hw-wfc/src/cost_model.py), not as a hard elimination in [src/constraint.py](/mnt/d/devel/hw-wfc/src/constraint.py). So this differentiation is a heuristic result, not proof that `32x32` Softmax is physically impossible.
+Softmax working memory: 4x × 4KB = 16KB > 12KB SRAM → `32x32` eliminated by hard constraint. Both algorithms select `16x16`.
+
+---
+
+## Cost Model ↔ GPU Correlation
+
+Spearman rank correlation between cost model scores and actual Triton execution time (RTX 3060, CUDA 12.8).
+
+| Layer | Workload | ρ | Sig |
+|-------|----------|---|-----|
+| Softmax | Medium–Large | **+1.00** | *** |
+| MatMul | Large (2048²) | **+0.72** | * |
+| MatMul | GPT-2 FFN | +0.66 | ns |
+| MatMul | Small (256x512) | -0.69 | ns |
+
+Average ρ = +0.52. Directionally useful but not precise. The roofline component saturates for MatMul, leaving `cache_efficiency` as the only discriminator.
+
+Reproduced by: `python examples/cost_model_correlation.py`
+
+---
 
 ## Visualizations
 
-All visualizations are regenerated via `python tools/generate_all_visuals.py`.
-Updating visuals after code changes provides a visual diff against previous results.
-History is auto-appended to [assets/VISUALS_LOG.md](assets/VISUALS_LOG.md).
+Regenerated via `python tools/generate_all_visuals.py`.
 
-### Cost Model Score Distribution
+| | |
+|---|---|
+| ![Score Distribution](assets/score_distribution.png) | ![Propagation Sweep](assets/propagation_sweep.png) |
+| Cost model score decomposition (Roofline + Affinity + Cache) | Candidate removal rate by threshold (t=1.5 → 43%) |
+| ![Copier Problem](assets/copier_problem.png) | ![SRAM Comparison](assets/sram_comparison.png) |
+| 64KB: all same state. 12KB: working memory forces differentiation | SRAM size impact on scheduling decisions |
 
-Per-layer-type candidate scores decomposed into Roofline (blue) + Affinity (orange) + Cache (green). Red indicates cache penalty.
-
-![Score Distribution](assets/score_distribution.png)
-
-### Constraint Propagation Sweep
-
-Candidate removal rate as threshold varies from 0.3 to 3.0. Red line (25%) is the passing criterion. Current t=1.5 yields 43%.
-
-![Propagation Sweep](assets/propagation_sweep.png)
-
-### The Copier Problem (Failure → Fix)
-
-With ample SRAM (64KB), all layers converge to the same state — the "copier problem."
-Reducing SRAM to 12KB makes the current WFC heuristic pick a different Softmax tile.
-
-![Copier Problem](assets/copier_problem.png)
-
-### Backtracking: Contradiction & Recovery
-
-Intentionally constructed unsolvable constraint configurations verify that backtracking actually fires.
-In a ROW → ? → COL chain with threshold=0.5, contradiction occurs → 1 backtrack → confirmed failure.
-
-![Backtracking](assets/backtracking.png)
-
-### SRAM Size Impact
-
-The same 6-layer Attention Block scheduled under 64KB / 16KB / 12KB SRAM.
-Only in the current 12KB heuristic run does Softmax select a smaller tile (16×16), producing differentiation.
-
-![SRAM Comparison](assets/sram_comparison.png)
+---
 
 ## Architecture
 
 ```
-┌─────────────┐     ┌───────────────┐     ┌──────────────┐
-│  LayerNode  │────▶│ HardConstraint│────▶│  CostModel   │
-│ (candidates)│     │  (SRAM, align)│     │ (roofline +  │
-│             │     │               │     │  affinity +  │
-│ HWState[]   │     └───────────────┘     │  cache)      │
-└─────────────┘                           └──────┬───────┘
-                                                 │
-       ┌──────────────────────────────────────────┘
-       ▼
-┌──────────────┐     ┌───────────────┐     ┌──────────────┐
-│CollapseEngine│────▶│  Propagation  │────▶│  Scheduler   │
-│ (entropy,    │     │ (layout +     │     │ (bottleneck  │
-│  backtrack)  │     │  tile_shape + │     │  first,      │
-│              │     │  location)    │     │  bidirect)   │
-└──────────────┘     └───────────────┘     └──────────────┘
+LayerNode ──▶ HardConstraint ──▶ CostModel ──▶ CollapseEngine ──▶ Propagation ──▶ Scheduler
+(candidates)  (SRAM, align,     (roofline +    (entropy,         (layout +       (bottleneck
+ HWState[]     working memory)   affinity +      backtrack)        tile_shape +     first,
+                                 cache)                            location)        bidirect)
 ```
 
-## GPU Execution Verification (v2.7)
+### Cost Model
 
-Codegen-generated Triton kernels were re-verified in `.venv` on RTX 3060 (SM86, CUDA 12.8):
+Three-component additive scoring:
+- **Roofline Score** — Data reuse from tiling (saturates at 1.0 for MatMul on large SRAM)
+- **Layout Affinity** — Per-layer-type layout preference
+- **Cache Efficiency** — Gaussian over SRAM utilization with working memory multiplier
 
-| Kernel | Type | Result | Error |
-|--------|------|--------|-------|
-| Linear (MatMul) | GEMM | PASS | rel_err < 0.5% (fp16) |
-| ReLU | Element-wise | PASS | Exact match |
-| Softmax | Row-parallel | PASS | max_diff < 1e-8 |
+### Hardware Specs
 
-### HW-WFC vs Triton Autotuner
+| Spec | SRAM | Role |
+|------|------|------|
+| `stress_gpu.json` | 12KB | Primary benchmark — forces differentiation |
+| `toy_gpu.json` | 64KB | Baseline — exposes copier problem |
+| `a100.json` / `h100.json` | 192–256KB | Scaling validation |
+| `rtx3060.json` | 100KB | GPU execution verification |
 
-This section is currently under re-audit.
+---
 
-Repeated reruns in the same `.venv` and on the same RTX 3060 already showed materially different averages (`118%` and `84%` WFC/autotuner).
-We then repeated the script 5 more times in isolated processes with separate `TRITON_CACHE_DIR` values and no other visible GPU compute processes; the average ratio still ranged from `86.0%` to `94.6%`, so the old fixed TFLOPS table is still not stable enough for README use.
+## Safety Checks (5/5 Pass)
 
-What is verified today:
-- The Triton kernels execute correctly on the target GPU.
-- The comparison script runs end-to-end in `.venv`.
-- A pattern does emerge under isolated reruns: the tiny `Small (256x512x256)` case is unstable at ~`0.01-0.02ms` and Triton flips between `32x64x32` and `32x32x32`, while the larger workloads are more consistent and Triton usually stays about `5-20%` ahead of the current WFC choice.
-- The current benchmarking methodology still needs stabilization before we can claim a single authoritative WFC/autotuner ratio.
+| # | Check | Criteria | Result |
+|---|-------|----------|--------|
+| 1 | Hard Constraint | No false positives/negatives | Pass |
+| 2 | Cost Model discrimination | Score spread > 0.01 | 1.19 |
+| 3 | Propagation | Removal > 25% at t=1.5 | 43% |
+| 4 | Backtracking | Triggers on contradiction | Verified |
+| 5 | No copier problem | Heterogeneous layers differentiate | WFC = DP |
+
+Run: `python tests/test_safety_checks.py`
+
+---
+
+## Limitations
+
+- **No demonstrated advantage** over exact DP or autotuner on this problem.
+- **Cost model precision**: ρ = +0.52 average. Directional, not reliable for production scheduling.
+- **Virtual spec dependency**: Key results require artificially constrained SRAM (12KB). Real GPUs (192–256KB) make the problem trivial.
+- **Roofline saturation**: MatMul scores converge, limiting workload-specific tile recommendation.
+- **Single-kernel scope**: No multi-kernel fusion, operator scheduling, or cross-layer memory planning.
+
+## Path Forward
+
+The primary bottleneck is cost model precision. If rank correlation can be improved from ρ = +0.52 to ρ ≥ +0.8 through GPU profiling data calibration, the approach could predict competitive tile configurations without hardware execution — enabling cross-compilation, design-space exploration, and autotuner warm-starting.
+
+This calibration requires real GPU profiling data across diverse workloads, which is beyond the scope of this software experiment.
+
+---
 
 ## Quick Start
 
 ```bash
-# Schedule a Transformer Attention Block
-python examples/attention_block.py
-
-# Reproduce the README benchmark (top-8 exhaustive baseline)
-python examples/attention_exhaustive_benchmark.py
-
-# Run Safety Checks
-python tests/test_safety_checks.py
-
-# Verify Triton kernels on GPU (requires torch + triton)
-python examples/triton_verify.py
-
-# Compare WFC vs Triton autotuner
-python examples/triton_autotuner_compare.py
-
-# Generate / update all visualizations
-python tools/generate_all_visuals.py
+python examples/attention_block.py                # Schedule an Attention Block
+python examples/attention_exhaustive_benchmark.py  # Reproduce key results
+python tests/test_safety_checks.py                 # Run safety checks
+python examples/cost_model_correlation.py          # Cost model ↔ GPU correlation
+python examples/triton_verify.py                   # Triton kernel correctness (GPU required)
 ```
-
-## Cost Model
-
-Three-component additive scoring:
-
-- **Roofline Score** — Reflects data reuse from tiling. Larger tiles improve MatMul OI; wider tile_n helps Softmax
-- **Layout Affinity** — Per-layer-type layout preference (LINEAR→ROW_MAJOR, SOFTMAX→ROW_MAJOR, CONV2D→BLOCK_TILED)
-- **Cache Efficiency** — Gaussian over SRAM utilization (peaks at 75%, applies working memory multiplier per layer type)
-
-## Hardware Specs
-
-| Spec | SRAM | Purpose |
-|------|------|---------|
-| `toy_gpu.json` | 64KB | Comfortable environment, basic validation |
-| `tight_gpu.json` | 16KB | Moderate constraint |
-| `stress_gpu.json` | 12KB | Tight SRAM, forces per-layer-type differentiation |
-| `a100.json` | 192KB | NVIDIA A100 (HBM2e 2039 GB/s) |
-| `h100.json` | 256KB | NVIDIA H100 (HBM3 3352 GB/s) |
-| `rtx3060.json` | 100KB | NVIDIA RTX 3060 (GDDR6 360 GB/s) — GPU execution verified |
-
-## Safety Checks (5/5 Pass)
-
-| # | Check | Status | Criteria |
-|---|-------|--------|----------|
-| 1 | Hard Constraint correctness | Pass | No false positives/negatives |
-| 2 | Cost Model discrimination | Pass | Score spread > 0.01 (actual: 1.19) |
-| 3 | Propagation effectiveness | Pass | Removal > 25% at t=1.5 (actual: 43%) |
-| 4 | Backtracking liveness | Pass | Triggers on contradiction (verified) |
-| 5 | No copier problem | Pass | Heterogeneous layers get different states |
 
 ## Project Structure
 
@@ -192,27 +177,27 @@ Three-component additive scoring:
 hw-wfc/
 ├── src/                    # Core algorithm
 │   ├── state.py            # HWState, LayerNode, superposition
-│   ├── constraint.py       # Hard/soft constraints, propagation, auto-weight
+│   ├── constraint.py       # Hard/soft constraints, propagation
 │   ├── cost_model.py       # Roofline + affinity + cache
 │   ├── collapse.py         # Entropy-based collapse + backtracking
 │   └── scheduler.py        # Main pipeline
 ├── specs/                  # Hardware specifications (JSON)
-├── examples/               # PoC scripts
+├── examples/               # Benchmarks and experiments
 ├── tests/                  # Safety checks
-├── tools/                  # Visualization generators
-├── assets/                 # Generated images/GIFs
 ├── docs/
-│   ├── concept.md / .ko.md             # Algorithm concept & motivation (EN/KO)
-│   ├── architecture_guide.md / .ko.md  # Design rationale guide (EN/KO)
+│   ├── result.md / .ko.md              # Research results (EN/KO)
+│   ├── concept.md / .ko.md             # Algorithm concept (EN/KO)
+│   ├── architecture_guide.md / .ko.md  # Design rationale (EN/KO)
 │   └── daily_logs/                     # Work logs
-└── HANDOFF.md              # Next tasks & ideas
+└── HANDOFF.md              # Project status and future work
 ```
 
 ## Requirements
 
 - Python 3.10+
-- Pillow (visualization only)
-- PyTorch + Triton (GPU verification only, `pip install torch triton`)
+- scipy (correlation analysis)
+- Pillow (visualization)
+- PyTorch + Triton (GPU verification, `pip install torch triton`)
 
 ## License
 

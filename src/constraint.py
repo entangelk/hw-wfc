@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .state import HWState, LayerNode, MemoryLayout, ComputeLocation
+from .state import HWState, LayerNode, LayerType, MemoryLayout, ComputeLocation, working_memory_multiplier
 
 
 @dataclass
@@ -43,10 +43,28 @@ class HardwareSpec:
 # ─── Hard Constraints ────────────────────────────────────────────
 
 def check_sram_capacity(state: HWState, spec: HardwareSpec, dtype_bytes: int = 4) -> bool:
-    """SRAM 용량 초과 여부. True = 유효(통과)."""
+    """SRAM 용량 초과 여부 (단일 타일). True = 유효(통과)."""
     if state.location == ComputeLocation.DRAM:
         return True  # DRAM이면 SRAM 제약 무관
     return state.memory_bytes(dtype_bytes) <= spec.sram_bytes
+
+
+def check_working_memory(
+    state: HWState,
+    layer_type: LayerType,
+    spec: HardwareSpec,
+    dtype_bytes: int = 4,
+) -> bool:
+    """Working memory가 SRAM에 들어가는지 검사. True = 유효(통과).
+
+    타일 하나를 처리할 때 필요한 총 버퍼(input + weight + output 등)가
+    동시에 SRAM에 올라가야 한다. 이 총량이 SRAM을 초과하면 물리적으로 불가능.
+    """
+    if state.location == ComputeLocation.DRAM:
+        return True
+    multiplier = working_memory_multiplier(layer_type)
+    actual_usage = state.memory_bytes(dtype_bytes) * multiplier
+    return actual_usage <= spec.sram_bytes
 
 
 def check_alignment(state: HWState, spec: HardwareSpec, dtype_bytes: int = 4) -> bool:
@@ -72,6 +90,7 @@ def apply_hard_constraints(
         s for s in node.candidates
         if check_sram_capacity(s, spec, dtype_bytes)
         and check_alignment(s, spec, dtype_bytes)
+        and check_working_memory(s, node.layer_type, spec, dtype_bytes)
     ]
     return original_count - len(node.candidates)
 
@@ -160,6 +179,6 @@ def propagate_constraints(
     original_count = len(neighbor.candidates)
     neighbor.candidates = [
         c for c in neighbor.candidates
-        if total_transition_penalty(src_state, c) < penalty_threshold
+        if total_transition_penalty(src_state, c) <= penalty_threshold
     ]
     return original_count - len(neighbor.candidates)

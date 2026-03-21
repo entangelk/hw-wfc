@@ -81,18 +81,19 @@ Spec design starts from the question: "Which aspect of the algorithm do we want 
 
 ```
 32x32 float32 tile = 4KB
-  -> LINEAR (working memory 3x) = 12KB -> 100% of SRAM
-  -> SOFTMAX (working memory 4x) = 16KB -> exceeds the working-memory target used by the cache penalty
+  -> LINEAR (working memory 3x) = 12KB -> 100% of SRAM -> passes hard constraint
+  -> SOFTMAX (working memory 4x) = 16KB -> exceeds 12KB SRAM -> eliminated by hard constraint
 
 16x16 float32 tile = 1KB
-  -> SOFTMAX (4x) = 4KB -> 33% of SRAM
+  -> SOFTMAX (4x) = 4KB -> 33% of SRAM -> passes
 ```
 
 What this means:
-- The current heuristic strongly prefers **32x32 for LINEAR** under stress_gpu
-- The current heuristic often prefers **16x16 for SOFTMAX** because the cache term penalizes working-memory overflow
-- Within the same model, **different layers can end up with different chosen tiles**
-- Whether the heuristic discovers this on its own is the core verification point (solving the "copier problem")
+- **32x32 for LINEAR** fits (3x = 12KB = 100% SRAM) and is the largest viable tile
+- **32x32 for SOFTMAX** is physically impossible (4x = 16KB > 12KB) and removed by hard constraint
+- **16x16 for SOFTMAX** is the largest tile whose working memory fits in SRAM
+- Within the same model, **different layers end up with different tiles due to physical constraints**
+- Both WFC heuristic and exact DP agree on this differentiation
 
 #### What Is the Working Memory Multiplier?
 
@@ -348,7 +349,9 @@ Verification method:
 - **5b**: Run heterogeneous layers (MatMul+Softmax+LayerNorm) on stress_gpu
 
 Pass criteria: `all_same_state = False` for heterogeneous layers.
-Current heuristic result: MatMul=32x32, Softmax=16x16 -- differentiation achieved.
+Current result: MatMul=32x32, Softmax=16x16 -- both WFC and exact DP produce the same differentiation.
+
+With the working memory hard constraint (v2.8), Softmax's `32x32 SRAM` is physically eliminated (4x × 4KB = 16KB > 12KB SRAM). Both WFC and DP must choose `16x16` for Softmax, confirming that the differentiation is driven by genuine physical constraints, not a greedy artifact.
 
 ---
 
@@ -365,8 +368,8 @@ Scheduling 4 layers of an Attention Block on stress_gpu (12KB):
   Total search space: 264 states
 
 [Step 1: Hard Constraint]
-  Remove tiles exceeding 12KB SRAM + alignment violations
-  -> 96 removed, 168 states remaining
+  Remove tiles exceeding 12KB SRAM + working memory overflow + alignment violations
+  -> 123 removed, 141 states remaining
 
 [Step 2: Bottleneck-First Collapse]
   QK_MatMul has highest FLOPs (536M) -> collapse first
@@ -374,37 +377,34 @@ Scheduling 4 layers of an Attention Block on stress_gpu (12KB):
   -> QK_MatMul collapsed
 
 [Step 3: Propagation]
-  QK_MatMul (32x32 ROW) -> Softmax: 20 candidates with transition penalty > 1.5 removed
-  -> Softmax reduced to 22 candidates
+  QK_MatMul (32x32 ROW) -> Softmax: candidates with transition penalty > 1.5 removed
+  -> Softmax reduced from 33 to 13 candidates
 
 [Step 4: Remaining Collapses]
-  Softmax: Entropy calculation -> 16x16 ROW_MAJOR scores highest under the current heuristic
+  Softmax: Entropy calculation -> 16x16 ROW_MAJOR scores highest (32x32 SRAM eliminated by working memory hard constraint)
   AV_MatMul -> 32x32 ROW_MAJOR (same physical reasoning as QK_MatMul)
   LayerNorm -> 32x32 ROW_MAJOR
 
 [Result]
   264 -> 4 states (98.5% reduction)
-  Only Softmax selects a different tile in this heuristic run -> copier problem resolved
+  Softmax selects a different tile due to physical working memory constraint -> copier problem resolved
+  Both WFC and exact DP produce identical results (100% quality match)
 ```
-
-Important note:
-- Working-memory overflow is currently modeled as a strong soft penalty in `cost_model.py`, not as a hard elimination in `constraint.py`
-- Because of that, this walkthrough reflects the current WFC heuristic path, not a proof of the global optimum over the full candidate set
 
 ---
 
 ## 8. Current Limitations and Known Constraints
 
 ### Algorithm Limitations
-- **1D chain only**: Propagation currently supports only linear chains (layer 0->1->2->3). DAG structures like ResNet skip connections or Transformer multi-head parallelism are not supported.
-- **Fixed threshold**: penalty_threshold=1.5 is not optimal for all models. Propagation may weaken with 100+ layers.
+- **Greedy, not optimal in general**: WFC collapses one layer at a time greedily. The heuristic does not guarantee the global optimum in general, though on the current `stress_gpu` benchmark it matches the exact DP result (100% quality).
 
 ### Cost Model Limitations
 - **Gap with actual execution time**: The Roofline model represents a theoretical upper bound. Cache conflicts, warp divergence, etc. are not captured.
-- **Immature Conv2D support**: No im2col-based memory traffic model yet. Currently treated identically to MatMul.
+- **Tile shape symmetry**: The cost model produces identical scores for tiles with the same area but different shapes (e.g., 64x128 vs 128x64). This means entropy-based selection between them is effectively arbitrary.
+- **Score saturation on large SRAM**: When SRAM is large enough that all tiles fit comfortably, roofline scores converge and the cost model loses discriminative power.
 
 ### Validation Limitations
-- **No real GPU benchmarks**: Whether the cost model scores correlate with actual execution times has not been verified.
+- **Triton correctness verified; cost model correlation partially established**: Codegen Triton kernels pass correctness tests on RTX 3060 (v2.7). Cost model correlation measured via Spearman rank correlation (v2.9): Softmax achieves perfect rank agreement (ρ = 1.0, p < 0.001), MatMul shows positive correlation on larger workloads (ρ = +0.72) but inverts on microbenchmark-scale inputs due to measurement noise. Average ρ = +0.52 across 9 workloads — directionally useful but not precise. See `examples/cost_model_correlation.py` for reproduction.
 - **Virtual spec based**: stress_gpu's 12KB SRAM does not exist on any real GPU. On an actual A100 (192KB), the problem may be too easy.
 
 ---

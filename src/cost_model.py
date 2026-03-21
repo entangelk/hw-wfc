@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 
-from .state import HWState, LayerNode, LayerType, MemoryLayout, ComputeLocation
+from .state import HWState, LayerNode, LayerType, MemoryLayout, ComputeLocation, working_memory_multiplier
 from .constraint import HardwareSpec
 
 
@@ -220,26 +220,6 @@ def layout_affinity(node: LayerNode, state: HWState) -> float:
     return 0.05
 
 
-def _working_memory_multiplier(layer_type: LayerType) -> float:
-    """레이어 타입별 working memory 배수.
-
-    타일 하나를 처리할 때 SRAM에 동시에 올려야 하는 버퍼 수.
-    - LINEAR: input_tile + weight_tile + output_tile = 3x
-    - CONV2D: input_tile + kernel + output_tile ≈ 3x
-    - SOFTMAX: input + exp_buffer + sum_buffer + output = 4x
-    - RELU: input + output = 2x
-    - LAYERNORM: input + mean/var + output = 3x
-    """
-    return {
-        LayerType.LINEAR: 3.0,
-        LayerType.CONV2D: 3.0,
-        LayerType.DEPTHWISE_CONV: 2.5,  # input_tile + kernel(작음) + output_tile
-        LayerType.SOFTMAX: 4.0,
-        LayerType.RELU: 2.0,
-        LayerType.LAYERNORM: 3.0,
-    }.get(layer_type, 2.0)
-
-
 def cache_efficiency(
     node: LayerNode, state: HWState, spec: HardwareSpec, dtype_bytes: int = 4,
 ) -> float:
@@ -251,7 +231,7 @@ def cache_efficiency(
     if state.location != ComputeLocation.SRAM:
         return 0.0
 
-    multiplier = _working_memory_multiplier(node.layer_type)
+    multiplier = working_memory_multiplier(node.layer_type)
     actual_usage_bytes = state.memory_bytes(dtype_bytes) * multiplier
     usage = actual_usage_bytes / spec.sram_bytes
 

@@ -77,7 +77,7 @@ During collapse, transition costs with adjacent nodes are subtracted from the ba
 | Aspect | Grid Search / RL | HW-WFC |
 |--------|-----------------|--------|
 | **Search Strategy** | Random mutation + runtime measurement (Trial & Error) | Infeasible state elimination via constraints (Deductive) |
-| **Time Complexity** | Thousands to tens of thousands of compilations required | Cascading collapse drastically reduces candidates (~2ms) |
+| **Time Complexity** | Thousands to tens of thousands of compilations required | Cascading collapse drastically reduces candidates (~2-3ms) |
 | **Optimization Direction** | Forward (input -> output) | Bidirectional (bottleneck -> simultaneous propagation both ways) |
 | **Hardware Change** | Full re-search from scratch | Instant adaptation by swapping spec (JSON) |
 | **Inter-Layer Interaction** | Independent optimization (no interaction) | Global optimization via transition costs + propagation |
@@ -117,14 +117,20 @@ A research principle of questioning "the results look good, but are they actuall
 
 ### Phase 1: Core Algorithm Refinement
 - ~~Automatic transition cost weight derivation~~ (Done, v2.2)
-- 2D graph propagation (DAG support: skip connections, multi-head parallelism)
-- Adaptive penalty threshold
+- ~~2D graph propagation (DAG support: skip connections, multi-head parallelism)~~ (Done, v2.3)
+- ~~Adaptive penalty threshold~~ (Done, v2.4)
 
 ### Phase 2: Realistic Models & Specs
-- Testing with real GPU specs (A100, H100)
-- Large-scale model scaling (GPT-2 Small 72 layers, BERT-Base 84 layers)
-- Conv2D / Depthwise Conv support
+- ~~Testing with real GPU specs (A100, H100)~~ (Done, v2.5)
+- ~~Large-scale model scaling (GPT-2 Small 72 layers, BERT-Base 84 layers)~~ (Done, v2.5)
+- ~~Conv2D / Depthwise Conv support~~ (Done, v2.6)
 
 ### Phase 3: Output & Integration
-- Schedule results -> automatic Triton / CUDA kernel parameter generation
-- Interactive visualization dashboard
+- ~~Schedule results -> automatic Triton / CUDA kernel parameter generation~~ (Done, v2.6)
+- ~~Visualization module~~ (Done, v2.6)
+
+### Phase 4: Execution Verification & Optimization
+- ~~Triton kernel GPU verification~~ (Done, v2.7)
+- Performance optimization (entropy caching, score computation)
+- Benchmark / objective consistency redesign
+- Triton autotuner benchmark stabilization

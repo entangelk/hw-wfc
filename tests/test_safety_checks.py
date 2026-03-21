@@ -13,7 +13,10 @@ from src.state import (
     LayerNode, LayerType, HWState,
     MemoryLayout, ComputeLocation, generate_default_candidates,
 )
-from src.constraint import HardwareSpec, apply_hard_constraints, propagate_constraints
+from src.constraint import (
+    HardwareSpec, apply_hard_constraints, propagate_constraints,
+    derive_transition_weight, total_transition_penalty,
+)
 from src.cost_model import compute_score, score_all_candidates
 from src.scheduler import HWWFCScheduler
 
@@ -99,12 +102,8 @@ def check_1_hard_constraint_correctness():
 #        반대로 한 후보만 압도적이면, Cost Model이 아니라
 #        그냥 "SRAM에 가장 큰 타일"을 고르는 것과 같음.
 # ═══════════════════════════════════════════════════════════════
-def check_2_cost_model_discrimination():
-    print("\n" + "=" * 60)
-    print("  Safety Check #2: Cost Model 변별력")
-    print("=" * 60)
-
-    spec = load_spec()
+def _run_discrimination_check(spec: HardwareSpec, spec_label: str):
+    """단일 스펙에 대한 Cost Model 변별력 검사."""
     node = LayerNode(
         name="Test_Linear",
         layer_type=LayerType.LINEAR,
@@ -112,30 +111,55 @@ def check_2_cost_model_discrimination():
         candidates=generate_default_candidates(),
     )
 
-    # Hard constraint 먼저 적용
     apply_hard_constraints(node, spec)
     scored = score_all_candidates(node, spec)
 
-    print(f"\n  Hard constraint 후 남은 후보: {len(scored)}개")
-    print(f"\n  점수 분포:")
+    print(f"\n  [{spec_label}] Hard constraint 후 남은 후보: {len(scored)}개")
+    print(f"  점수 분포:")
     for state, score in scored:
         bar = "█" * int(score * 40)
         print(f"    {state} → {score:.4f} {bar}")
 
     scores = [s for _, s in scored]
-    if scores:
-        max_s, min_s = max(scores), min(scores)
-        spread = max_s - min_s
-        print(f"\n  점수 범위: {min_s:.4f} ~ {max_s:.4f} (spread: {spread:.4f})")
+    if not scores:
+        print(f"  !! 후보 없음")
+        return
 
-        if spread < 0.01:
-            print(f"  !! 경고: 점수 spread가 {spread:.4f}로 매우 좁음")
-            print(f"     → Cost Model이 사실상 후보를 구분하지 못함")
-            print(f"     → 엔트로피 기반 선택 ≈ 랜덤 선택")
-        elif scores[0] > scores[1] * 2 if len(scores) > 1 else False:
-            print(f"  !! 주의: 1등이 2등의 2배 이상 → Cost Model이 아니라 단순 max 선택")
-        else:
-            print(f"  OK: 적절한 변별력 있음")
+    max_s, min_s = max(scores), min(scores)
+    spread = max_s - min_s
+
+    # 동점 그룹 카운트 (소수점 4자리 기준)
+    distinct_scores = set(round(s, 4) for s in scores)
+    num_distinct = len(distinct_scores)
+    num_tied = len(scores) - num_distinct
+
+    print(f"\n  점수 범위: {min_s:.4f} ~ {max_s:.4f} (spread: {spread:.4f})")
+    print(f"  고유 점수 수: {num_distinct}개 / 전체 {len(scores)}개 (동점: {num_tied}개)")
+
+    if spread < 0.01:
+        print(f"  !! 경고: 점수 spread가 {spread:.4f}로 매우 좁음")
+        print(f"     → Cost Model이 사실상 후보를 구분하지 못함")
+    elif num_distinct < 3:
+        print(f"  !! 경고: 고유 점수가 {num_distinct}단계뿐 → 구분력 부족")
+    else:
+        print(f"  OK: spread={spread:.2f}, {num_distinct}단계 구분")
+    if num_tied > 0:
+        print(f"  주의: 동점 후보 {num_tied}개 존재 (같은 면적 직사각 타일 등)")
+
+
+def check_2_cost_model_discrimination():
+    print("\n" + "=" * 60)
+    print("  Safety Check #2: Cost Model 변별력")
+    print("=" * 60)
+
+    # toy_gpu (64KB) — 넉넉한 환경
+    spec_toy = load_spec()
+    _run_discrimination_check(spec_toy, "toy_gpu 64KB")
+
+    # stress_gpu (12KB) — 핵심 검증 환경
+    stress_spec_path = Path(__file__).resolve().parent.parent / "specs" / "stress_gpu.json"
+    spec_stress = HardwareSpec.from_json(stress_spec_path)
+    _run_discrimination_check(spec_stress, "stress_gpu 12KB")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -381,6 +405,84 @@ def check_5_scaling():
         print(f"  !! 이질적 레이어인데도 동일 상태 → 복사기 문제 미해결")
     else:
         print(f"  OK: 레이어별 다른 상태를 선택함 → 복사기 문제는 피함")
+
+    # ── 5b 추가 검증: WFC 차별화가 "올바른 방향"인지 exact DP와 비교 ──
+    if result.success:
+        print(f"\n  [5b-DP] Exact DP로 같은 문제를 풀어 WFC 차별화 방향 검증:")
+        weight = derive_transition_weight(stress_spec)
+
+        # DP용 노드 재생성
+        dp_nodes = [
+            LayerNode(name="QK_MatMul", layer_type=LayerType.LINEAR,
+                      dims={"M": 2048, "N": 2048, "K": 64},
+                      candidates=generate_default_candidates()),
+            LayerNode(name="Softmax", layer_type=LayerType.SOFTMAX,
+                      dims={"M": 2048, "N": 2048},
+                      candidates=generate_default_candidates()),
+            LayerNode(name="AV_MatMul", layer_type=LayerType.LINEAR,
+                      dims={"M": 2048, "N": 64, "K": 2048},
+                      candidates=generate_default_candidates()),
+            LayerNode(name="LayerNorm", layer_type=LayerType.LAYERNORM,
+                      dims={"M": 2048, "N": 512},
+                      candidates=generate_default_candidates()),
+        ]
+        for n in dp_nodes:
+            apply_hard_constraints(n, stress_spec)
+
+        candidate_lists = [list(n.candidates) for n in dp_nodes]
+        unary = [
+            [compute_score(n, s, stress_spec) for s in states]
+            for n, states in zip(dp_nodes, candidate_lists)
+        ]
+
+        # Viterbi DP
+        dp = unary[0][:]
+        backpointers: list[list[int]] = []
+        for layer_idx in range(1, len(candidate_lists)):
+            prev_states = candidate_lists[layer_idx - 1]
+            cur_states = candidate_lists[layer_idx]
+            cur_unary = unary[layer_idx]
+            cur_dp: list[float] = []
+            cur_back: list[int] = []
+            for ci, cs in enumerate(cur_states):
+                best_val = None
+                best_prev = 0
+                for pi, ps in enumerate(prev_states):
+                    val = dp[pi] + cur_unary[ci] - weight * total_transition_penalty(ps, cs)
+                    if best_val is None or val > best_val:
+                        best_val = val
+                        best_prev = pi
+                cur_dp.append(best_val)
+                cur_back.append(best_prev)
+            dp = cur_dp
+            backpointers.append(cur_back)
+
+        best_last = max(range(len(dp)), key=lambda i: dp[i])
+        dp_states = [candidate_lists[-1][best_last]]
+        for li in range(len(candidate_lists) - 2, -1, -1):
+            best_last = backpointers[li][best_last]
+            dp_states.append(candidate_lists[li][best_last])
+        dp_states.reverse()
+
+        dp_all_same = all(s == dp_states[0] for s in dp_states)
+        for n, s in zip(dp_nodes, dp_states):
+            print(f"    DP {n.name}: {s}")
+        print(f"  DP all_same_state={dp_all_same}")
+
+        # WFC와 DP 차별화 방향 비교
+        wfc_diff_layers = [n.name for n in nodes if n.collapsed_state != nodes[0].collapsed_state]
+        dp_diff_layers = [n.name for n, s in zip(dp_nodes, dp_states) if s != dp_states[0]]
+
+        if set(wfc_diff_layers) == set(dp_diff_layers):
+            print(f"  OK: WFC와 DP가 같은 레이어({wfc_diff_layers})에서 차별화 → 방향 일치")
+        elif not dp_all_same and not all_same:
+            print(f"  주의: 둘 다 차별화하지만 위치가 다름")
+            print(f"    WFC 차별화: {wfc_diff_layers}")
+            print(f"    DP  차별화: {dp_diff_layers}")
+        elif dp_all_same and not all_same:
+            print(f"  !! 경고: DP는 전부 같은 상태를 선택하지만 WFC만 다름 → WFC 차별화가 최적이 아닐 수 있음")
+        else:
+            print(f"  !! 경고: DP는 차별화하지만 WFC는 못 함")
 
 
 def main():
